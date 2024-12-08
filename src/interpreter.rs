@@ -1,10 +1,11 @@
 use std::io::Read as _;
 
+use crate::parser::{self, Instruction};
+
 #[derive(Debug)]
 pub struct Runtime {
-    instructions: Vec<char>,
+    instructions: Vec<Instruction>,
     pc: usize,
-    jump_stack: Vec<usize>,
     memory: Vec<u8>,
     // Data pointer
     dp: usize,
@@ -26,50 +27,36 @@ pub const MEMORY_SIZE: usize = 30000;
 
 impl Runtime {
     pub fn new(program: &str) -> Self {
+        let instructions = parser::parser(program);
         Self {
-            instructions: program
-                .chars()
-                .filter(|c| ['>', '<', '+', '-', '.', ',', '[', ']'].contains(c))
-                .collect(),
+            instructions,
             pc: 0,
-            jump_stack: Vec::new(),
             memory: vec![0; MEMORY_SIZE],
             dp: MEMORY_SIZE / 2,
         }
     }
 
     pub fn run(&mut self) {
-        while self.pc < self.instructions.len() {
+        use Instruction::*;
+        loop {
             match self.instructions[self.pc] {
-                '>' => self.dp += 1,
-                '<' => self.dp -= 1,
-                '+' => self.memory[self.dp] = self.memory[self.dp].wrapping_add(1),
-                '-' => self.memory[self.dp] = self.memory[self.dp].wrapping_sub(1),
-                '.' => putchar(self.memory[self.dp]),
-                ',' => self.memory[self.dp] = readchar(),
-                '[' => {
+                PointerIncrement(n) => self.dp += n as usize,
+                PointerDecrement(n) => self.dp -= n as usize,
+                ValueIncrement(n) => self.memory[self.dp] = self.memory[self.dp].wrapping_add(n),
+                ValueDecrement(n) => self.memory[self.dp] = self.memory[self.dp].wrapping_sub(n),
+                PutChar => putchar(self.memory[self.dp]),
+                ReadChar => self.memory[self.dp] = readchar(),
+                LoopStart { end } => {
                     if self.memory[self.dp] == 0 {
-                        let mut bracket_count = 1;
-                        while bracket_count != 0 {
-                            self.pc += 1;
-                            match self.instructions[self.pc] {
-                                '[' => bracket_count += 1,
-                                ']' => bracket_count -= 1,
-                                _ => (),
-                            }
-                        }
-                    } else {
-                        self.jump_stack.push(self.pc);
+                        self.pc = end;
                     }
                 }
-                ']' => {
+                LoopEnd { start } => {
                     if self.memory[self.dp] != 0 {
-                        self.pc = *self.jump_stack.last().unwrap();
-                    } else {
-                        self.jump_stack.pop();
+                        self.pc = start;
                     }
                 }
-                c => eprintln!("Invalid instruction: {c}"),
+                End => break,
             }
             self.pc += 1;
         }

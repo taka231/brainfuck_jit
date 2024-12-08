@@ -1,10 +1,13 @@
 use std::alloc;
 
-use crate::interpreter;
+use crate::{
+    interpreter,
+    parser::{self, Instruction},
+};
 
 #[derive(Debug)]
-pub struct Compiler<'a> {
-    instructions: &'a str,
+pub struct Compiler {
+    instructions: Vec<Instruction>,
     jump_stack: Vec<*mut u8>,
     code_current: *mut u8,
     code_start: *mut u8,
@@ -17,8 +20,8 @@ extern "C" {
     fn mprotect(addr: *const libc::c_void, len: libc::size_t, prot: libc::c_int) -> libc::c_int;
 }
 
-impl<'a> Compiler<'a> {
-    pub unsafe fn new(program: &'a str) -> Self {
+impl Compiler {
+    pub unsafe fn new(program: &str) -> Self {
         let layout = alloc::Layout::from_size_align(CODE_AREA_SIZE, PAGE_SIZE).unwrap();
         let code_start = alloc::alloc(layout);
         let r = mprotect(
@@ -29,7 +32,7 @@ impl<'a> Compiler<'a> {
         assert!(r == 0, "mprotect failed");
 
         Self {
-            instructions: program,
+            instructions: parser::parser(program),
             jump_stack: Vec::new(),
             code_current: code_start,
             code_start,
@@ -47,6 +50,7 @@ impl<'a> Compiler<'a> {
     }
 
     pub unsafe fn compile(&mut self) {
+        use Instruction::*;
         // prologue
         // push rbp
         self.emit_code(&[0x50 + 5]);
@@ -59,17 +63,31 @@ impl<'a> Compiler<'a> {
         // add rsp, -8
         self.emit_code(&[0x48, 0x83, 0b11_000_100, 0xf8]);
 
-        for instr in self.instructions.chars() {
+        for instr in self.instructions.clone() {
             match instr {
-                // add rbx, 1
-                '>' => self.emit_code(&[0x48, 0x83, 0b11_000_011, 1]),
-                // sub rbx, -1
-                '<' => self.emit_code(&[0x48, 0x83, 0b11_000_011, 0xff]),
-                // add [rbx], 1
-                '+' => self.emit_code(&[0x80, 0b00_000_011, 1]),
-                // add [rbx], -1
-                '-' => self.emit_code(&[0x80, 0b00_000_011, 0xff]),
-                '.' => {
+                // add rbx, (n)
+                PointerIncrement(n) => {
+                    if n > i32::MAX as u32 {
+                        unimplemented!("n > i32::MAX");
+                    }
+                    self.emit_code(&[0x48, 0x81, 0b11_000_011]);
+                    self.emit_code(&n.to_le_bytes());
+                }
+                // add rbx, (-n)
+                PointerDecrement(n) => {
+                    if n > -(i32::MIN as i64) as u32 {
+                        unimplemented!("n > i32::MAX");
+                    }
+                    self.emit_code(&[0x48, 0x81, 0b11_000_011]);
+                    self.emit_code(&(-(n as i32)).to_le_bytes());
+                }
+                // addb [rbx], (n)
+                ValueIncrement(n) => self.emit_code(&[0x80, 0b00_000_011, n]),
+                // addb [rbx], (-n)
+                ValueDecrement(n) => {
+                    self.emit_code(&[0x80, 0b00_000_011, (0xff - n).wrapping_add(1)])
+                }
+                PutChar => {
                     // mov dil, [rbx]
                     self.emit_code(&[0x40, 0x8a, 0b00_111_011]);
                     // mov r10, imm (address of putchar)
@@ -78,7 +96,7 @@ impl<'a> Compiler<'a> {
                     // call r10
                     self.emit_code(&[0x41, 0xff, 0b11_010_010])
                 }
-                ',' => {
+                ReadChar => {
                     // mov r10, imm (address of readchar)
                     self.emit_code(&[0b0100_1001, 0xb8 + 2]);
                     self.emit_code(&(interpreter::readchar as *const () as u64).to_le_bytes());
@@ -87,15 +105,15 @@ impl<'a> Compiler<'a> {
                     // mov [rbx], al
                     self.emit_code(&[0x88, 0b00_000_011]);
                 }
-                '[' => {
-                    // cmp [rbx], 0
+                LoopStart { .. } => {
+                    // cmpb [rbx], 0
                     self.emit_code(&[0x80, 0b00_111_011, 0]);
                     // je 0 (dummy)
                     self.emit_code(&[0x0f, 0x84, 0, 0, 0, 0]);
                     self.jump_stack.push(self.code_current);
                 }
-                ']' => {
-                    // cmp [rbx], 0
+                LoopEnd { .. } => {
+                    // cmpb [rbx], 0
                     self.emit_code(&[0x80, 0b00_111_011, 0]);
 
                     let loop_start = self.jump_stack.pop().unwrap();
@@ -109,7 +127,7 @@ impl<'a> Compiler<'a> {
                         *loop_start.sub(4).add(i) = *byte;
                     }
                 }
-                _ => {}
+                End => {}
             }
         }
 
